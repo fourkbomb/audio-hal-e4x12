@@ -3,8 +3,6 @@
  *
  * Copyright (c) 2000 - 2013 Samsung Electronics Co., Ltd. All rights reserved.
  *
- * Contact: Hyunseok Lee <hs7388.lee@samsung.com>
- *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -26,9 +24,9 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#include <math.h>
 #include <vconf.h>
 #include <iniparser.h>
-#include <alsa/asoundlib.h>
 
 #include "tizen-audio-internal.h"
 
@@ -42,6 +40,7 @@ enum {
     STREAM_DEVICE_HEADSET,
     STREAM_DEVICE_BLUETOOTH,
     STREAM_DEVICE_HDMI,
+    STREAM_DEVICE_DOCK,
     STREAM_DEVICE_MAX,
 };
 
@@ -53,14 +52,26 @@ static const char *g_volume_vconf[AUDIO_VOLUME_TYPE_MAX] = {
     "file/private/sound/volume/media",          /* AUDIO_VOLUME_TYPE_MEDIA */
     "file/private/sound/volume/call",           /* AUDIO_VOLUME_TYPE_CALL */
     "file/private/sound/volume/voip",           /* AUDIO_VOLUME_TYPE_VOIP */
-    "file/private/sound/volume/svoice",         /* AUDIO_VOLUME_TYPE_SVOICE */
+    "file/private/sound/volume/voice",          /* AUDIO_VOLUME_TYPE_VOICE */
     "file/private/sound/volume/fixed",          /* AUDIO_VOLUME_TYPE_FIXED */
-    "file/private/sound/volume/java"            /* AUDIO_VOLUME_TYPE_EXT_JAVA */
 };
 
 static inline uint8_t __get_volume_dev_index(audio_mgr_t *am, uint32_t volume_type)
 {
-    return 0;
+
+    switch (am->device.active_out) {
+        case AUDIO_DEVICE_OUT_SPEAKER:          return AUDIO_VOLUME_DEVICE_SPEAKER;
+        case AUDIO_DEVICE_OUT_RECEIVER:         return AUDIO_VOLUME_DEVICE_RECEIVER;
+        case AUDIO_DEVICE_OUT_WIRED_ACCESSORY:  return AUDIO_VOLUME_DEVICE_EARJACK;
+        case AUDIO_DEVICE_OUT_BT_SCO:           return AUDIO_VOLUME_DEVICE_BT_SCO;
+        case AUDIO_DEVICE_OUT_BT_A2DP:          return AUDIO_VOLUME_DEVICE_BT_A2DP;
+        case AUDIO_DEVICE_OUT_DOCK:             return AUDIO_VOLUME_DEVICE_DOCK;
+        case AUDIO_DEVICE_OUT_HDMI:             return AUDIO_VOLUME_DEVICE_HDMI;
+        case AUDIO_DEVICE_OUT_MIRRORING:        return AUDIO_VOLUME_DEVICE_MIRRORING;
+        case AUDIO_DEVICE_OUT_USB_AUDIO:        return AUDIO_VOLUME_DEVICE_USB;
+        case AUDIO_DEVICE_OUT_MULTIMEDIA_DOCK:  return AUDIO_VOLUME_DEVICE_MULTIMEDIA_DOCK;
+        default:                                return AUDIO_VOLUME_DEVICE_SPEAKER;
+    }
 }
 
 static const uint8_t __get_stream_dev_index (uint32_t device_out)
@@ -71,11 +82,11 @@ static const uint8_t __get_stream_dev_index (uint32_t device_out)
     case AUDIO_DEVICE_OUT_WIRED_ACCESSORY:  return STREAM_DEVICE_HEADSET;
     case AUDIO_DEVICE_OUT_BT_SCO:           return STREAM_DEVICE_BLUETOOTH;
     case AUDIO_DEVICE_OUT_BT_A2DP:          return STREAM_DEVICE_BLUETOOTH;
-    case AUDIO_DEVICE_OUT_DOCK:             return STREAM_DEVICE_SPEAKER;
+    case AUDIO_DEVICE_OUT_DOCK:             return STREAM_DEVICE_DOCK;
     case AUDIO_DEVICE_OUT_HDMI:             return STREAM_DEVICE_HDMI;
     case AUDIO_DEVICE_OUT_MIRRORING:        return STREAM_DEVICE_SPEAKER;
     case AUDIO_DEVICE_OUT_USB_AUDIO:        return STREAM_DEVICE_SPEAKER;
-    case AUDIO_DEVICE_OUT_MULTIMEDIA_DOCK:  return STREAM_DEVICE_SPEAKER;
+    case AUDIO_DEVICE_OUT_MULTIMEDIA_DOCK:  return STREAM_DEVICE_DOCK;
     default:
         AUDIO_LOG_DEBUG("invalid device_out:%d", device_out);
         break;
@@ -91,16 +102,7 @@ static const char *__get_device_string_by_idx (uint32_t dev_idx)
     case STREAM_DEVICE_HEADSET:             return "headset";
     case STREAM_DEVICE_BLUETOOTH:           return "btheadset";
     case STREAM_DEVICE_HDMI:                return "hdmi";
-    default:                                return "invalid";
-    }
-}
-
-static const char *__get_direction_string_by_idx (uint32_t dir_idx)
-{
-    switch (dir_idx) {
-    case AUDIO_DIRECTION_NONE:              return "none";
-    case AUDIO_DIRECTION_IN:                return "in";
-    case AUDIO_DIRECTION_OUT:               return "out";
+    case STREAM_DEVICE_DOCK:                return "dock";
     default:                                return "invalid";
     }
 }
@@ -115,9 +117,8 @@ static const char *__get_volume_type_string_by_idx (uint32_t vol_type_idx)
     case AUDIO_VOLUME_TYPE_MEDIA:           return "media";
     case AUDIO_VOLUME_TYPE_CALL:            return "call";
     case AUDIO_VOLUME_TYPE_VOIP:            return "voip";
-    case AUDIO_VOLUME_TYPE_SVOICE:          return "svoice";
+    case AUDIO_VOLUME_TYPE_VOICE:           return "voice";
     case AUDIO_VOLUME_TYPE_FIXED:           return "fixed";
-    case AUDIO_VOLUME_TYPE_EXT_JAVA:        return "java";
     default:                                return "invalid";
     }
 }
@@ -143,20 +144,22 @@ static const char *__get_gain_type_string_by_idx (uint32_t gain_type_idx)
 static void __dump_info(char *dump, audio_info_t *info)
 {
     int len;
+    char name[64] = { '\0', };
 
     if (info->device.api == AUDIO_DEVICE_API_ALSA) {
-        len = sprintf(dump, "device:alsa(%d.%d)", info->device.alsa.card_idx, info->device.alsa.device_idx);
+        len = snprintf(dump, AUDIO_DUMP_STR_LEN, "device:alsa(%d.%d)", info->device.alsa.card_idx, info->device.alsa.device_idx);
     } else if (info->device.api == AUDIO_DEVICE_API_ALSA) {
-        len = sprintf(dump, "device:bluez(%s,nrec:%d)", info->device.bluez.protocol, info->device.bluez.nrec);
+        len = snprintf(dump, AUDIO_DUMP_STR_LEN, "device:bluez(%s,nrec:%d)", info->device.bluez.protocol, info->device.bluez.nrec);
     } else {
-        len = sprintf(dump, "device:unknown");
+        len = snprintf(dump, AUDIO_DUMP_STR_LEN, "device:unknown");
     }
 
     if (len > 0)
         dump += len;
 
-    len = sprintf(dump, "stream:%s(%dhz,%dch,vol:%s,gain:%s)",
-        info->stream.name ? info->stream.name : "null", info->stream.samplerate, info->stream.channels,
+    strncpy(name, info->stream.name ? info->stream.name : "null", sizeof(name)-1);
+    len = snprintf(dump, AUDIO_DUMP_STR_LEN, "stream:%s(%dhz,%dch,vol:%s,gain:%s)",
+        name, info->stream.samplerate, info->stream.channels,
         __get_volume_type_string_by_idx(info->stream.volume_type), __get_gain_type_string_by_idx(info->stream.gain_type));
 
     if (len > 0)
@@ -165,7 +168,6 @@ static void __dump_info(char *dump, audio_info_t *info)
     *dump = '\0';
 }
 
-#ifdef AUDIO_DEBUG
 static void __dump_tb (audio_mgr_t *am)
 {
     audio_volume_gain_table_t *volume_gain_table = am->stream.volume_gain_table;
@@ -186,12 +188,12 @@ static void __dump_tb (audio_mgr_t *am)
     char dump_str[AUDIO_DUMP_STR_LEN], *dump_str_ptr;
 
     /* Dump volume table */
-    AUDIO_LOG_DEBUG("<<<<< volume table >>>>>");
+    AUDIO_LOG_INFO("<<<<< volume table >>>>>");
 
     for (dev_idx = 0; dev_idx < STREAM_DEVICE_MAX; dev_idx++) {
         const char *dev_str = __get_device_string_by_idx(dev_idx);
 
-        AUDIO_LOG_DEBUG("<< %s >>", dev_str);
+        AUDIO_LOG_INFO("<< %s >>", dev_str);
 
         for (vol_type_idx = 0; vol_type_idx < AUDIO_VOLUME_TYPE_MAX; vol_type_idx++) {
             const char *vol_type_str = __get_volume_type_string_by_idx(vol_type_idx);
@@ -205,7 +207,7 @@ static void __dump_tb (audio_mgr_t *am)
                 snprintf(dump_str_ptr, 6, "%01.2f ", volume_gain_table->volume[vol_type_idx][vol_level_idx]);
                 dump_str_ptr += strlen(dump_str_ptr);
             }
-            AUDIO_LOG_DEBUG("%s", dump_str);
+            AUDIO_LOG_INFO("%s", dump_str);
         }
         volume_gain_table++;
     }
@@ -213,7 +215,7 @@ static void __dump_tb (audio_mgr_t *am)
     volume_gain_table = am->stream.volume_gain_table;
 
     /* Dump gain table */
-    AUDIO_LOG_DEBUG("<<<<< gain table >>>>>");
+    AUDIO_LOG_INFO("<<<<< gain table >>>>>");
 
     dump_str_ptr = &dump_str[0];
     memset(dump_str, 0x00, sizeof(char) * sizeof(dump_str));
@@ -225,7 +227,7 @@ static void __dump_tb (audio_mgr_t *am)
         snprintf(dump_str_ptr, 7, "%5s ", gain_type_str[gain_type_idx]);
         dump_str_ptr += strlen(dump_str_ptr);
     }
-    AUDIO_LOG_DEBUG("%s", dump_str);
+    AUDIO_LOG_INFO("%s", dump_str);
 
     for (dev_idx = 0; dev_idx < STREAM_DEVICE_MAX; dev_idx++) {
         const char *dev_str = __get_device_string_by_idx(dev_idx);
@@ -240,22 +242,22 @@ static void __dump_tb (audio_mgr_t *am)
             snprintf(dump_str_ptr, 7, "%01.3f ", volume_gain_table->gain[gain_type_idx]);
             dump_str_ptr += strlen(dump_str_ptr);
         }
-        AUDIO_LOG_DEBUG("%s", dump_str);
+        AUDIO_LOG_INFO("%s", dump_str);
 
         volume_gain_table++;
     }
 }
-#endif
 
 static audio_return_t __load_volume_gain_table_from_ini (audio_mgr_t *am)
 {
     dictionary * dict = NULL;
     uint32_t dev_idx, vol_type_idx, vol_level_idx, gain_type_idx;
     audio_volume_gain_table_t *volume_gain_table = am->stream.volume_gain_table;
+    int size = 0;
 
     dict = iniparser_load(VOLUME_INI_TEMP_PATH);
     if (!dict) {
-        AUDIO_LOG_DEBUG("Use temporary volume&gain ini file");
+        AUDIO_LOG_DEBUG("Use default volume&gain ini file");
         dict = iniparser_load(VOLUME_INI_DEFAULT_PATH);
         if (!dict) {
             AUDIO_LOG_WARN("Loading volume&gain table from ini file failed");
@@ -273,18 +275,23 @@ static audio_return_t __load_volume_gain_table_from_ini (audio_mgr_t *am)
             const char *vol_type_str = __get_volume_type_string_by_idx(vol_type_idx);
 
             volume_gain_table->volume_level_max[vol_type_idx] = 0;
-
-            key = malloc(strlen(dev_str) + strlen(vol_type_str) + 2);
+            size = strlen(dev_str) + strlen(vol_type_str) + 2;
+            key = malloc(size);
             if (key) {
-                sprintf(key, "%s:%s", dev_str, vol_type_str);
+                snprintf(key, size, "%s:%s", dev_str, vol_type_str);
                 list_str = iniparser_getstr(dict, key);
                 if (list_str) {
                     token = strtok_r(list_str, delimiter, &ptr);
                     while (token) {
-                        volume_gain_table->volume[vol_type_idx][volume_gain_table->volume_level_max[vol_type_idx]++] = atof(token);
+                        /* convert dB volume to linear volume */
+                        double vol_value = 0.0f;
+                        if(strncmp(token, "0", strlen(token)))
+                            vol_value = pow(10.0, (atof(token) - 100) / 20.0);
+                        volume_gain_table->volume[vol_type_idx][volume_gain_table->volume_level_max[vol_type_idx]++] = vol_value;
                         token = strtok_r(NULL, delimiter, &ptr);
                     }
                 } else {
+                     volume_gain_table->volume_level_max[vol_type_idx] = 1;
                     for (vol_level_idx = 0; vol_level_idx < AUDIO_VOLUME_LEVEL_MAX; vol_level_idx++) {
                         volume_gain_table->volume[vol_type_idx][vol_level_idx] = VOLUME_VALUE_MAX;
                     }
@@ -294,54 +301,71 @@ static audio_return_t __load_volume_gain_table_from_ini (audio_mgr_t *am)
         }
 
         /* Load gain table */
-        key = malloc(strlen(dev_str) + strlen("gain") + 2);
-        if (key) {
-            sprintf(key, "%s:gain", dev_str);
-            list_str = iniparser_getstr(dict, key);
-            if (list_str) {
-                token = strtok_r(list_str, delimiter, &ptr);
                 volume_gain_table->gain[AUDIO_GAIN_TYPE_DEFAULT] = GAIN_VALUE_MAX;
                 for (gain_type_idx = AUDIO_GAIN_TYPE_DEFAULT + 1; gain_type_idx < AUDIO_GAIN_TYPE_MAX; gain_type_idx++) {
+            const char *gain_type_str = __get_gain_type_string_by_idx(gain_type_idx);
+
+            size = strlen(dev_str) + strlen("gain") + strlen(gain_type_str) + 3;
+            key = malloc(size);
+            if (key) {
+                snprintf(key, size, "%s:gain_%s", dev_str, gain_type_str);
+                token = iniparser_getstr(dict, key);
                     if (token) {
                         volume_gain_table->gain[gain_type_idx] = atof(token);
-                        token = strtok_r(NULL, delimiter, &ptr);
                     } else {
                         volume_gain_table->gain[gain_type_idx] = GAIN_VALUE_MAX;
                     }
-                }
+                free(key);
             } else {
-                for (gain_type_idx = 0; gain_type_idx < AUDIO_GAIN_TYPE_MAX; gain_type_idx++)
                     volume_gain_table->gain[gain_type_idx] = GAIN_VALUE_MAX;
             }
-            free(key);
         }
         volume_gain_table++;
     }
 
     iniparser_freedict(dict);
-#ifdef AUDIO_DEBUG
+
     __dump_tb(am);
-#endif
 
     return AUDIO_RET_OK;
 }
 
 audio_return_t _audio_stream_init (audio_mgr_t *am)
 {
-    int i, value;
+    int i, j;
+    char *str = NULL;
+    audio_return_t audio_ret = AUDIO_RET_OK;
+    int init_value[AUDIO_VOLUME_TYPE_MAX] = { 9, 11, 7, 11, 7, 4, 4, 7, 4, 0 };
 
     AUDIO_RETURN_VAL_IF_FAIL(am, AUDIO_ERR_PARAMETER);
 
     for (i = 0; i < AUDIO_VOLUME_TYPE_MAX; i++) {
+        for (j = 0; j < AUDIO_VOLUME_DEVICE_MAX; j++) {
+            am->stream.volume_level[j][i] = init_value[i];
+        }
+    }
+
+    for (i = 0; i < AUDIO_VOLUME_TYPE_MAX; i++) {
         /* Get volume value string from VCONF */
-        if (vconf_get_int(g_volume_vconf[i], &value) != 0) {
-            AUDIO_LOG_ERROR("vconf_get_int(%s) failed", g_volume_vconf[i]);
+        if((str = vconf_get_str(g_volume_vconf[i])) == NULL) {
+            AUDIO_LOG_ERROR("vconf_get_str(%s) failed", g_volume_vconf[i]);
             continue;
         }
-        AUDIO_LOG_INFO("read vconf. %s = %d", g_volume_vconf[i], value);
+
+        AUDIO_LOG_INFO("read vconf. %s = %s", g_volume_vconf[i], str);
 
         /* Unified type uses only fisrt index of volume devices */
-        am->stream.volume_level[i] = value;
+
+        for (j = 0; j < AUDIO_VOLUME_DEVICE_MAX; j++) {
+            char val[3];
+            memset(val, 0, sizeof(val));
+            val[0] = str[j*2];
+            val[1] = str[j*2+1];
+            am->stream.volume_level[j][i] = atoi(val);
+        }
+
+       if (str)
+           free(str);
     }
 
     if (!(am->stream.volume_gain_table = malloc(STREAM_DEVICE_MAX * sizeof(audio_volume_gain_table_t)))) {
@@ -349,7 +373,13 @@ audio_return_t _audio_stream_init (audio_mgr_t *am)
         return AUDIO_ERR_RESOURCE;
     }
 
-    return __load_volume_gain_table_from_ini(am);
+    audio_ret = __load_volume_gain_table_from_ini(am);
+    if(audio_ret != AUDIO_RET_OK) {
+        AUDIO_LOG_ERROR("gain table load error");
+        return AUDIO_ERR_UNDEFINED;
+    }
+
+    return audio_ret;
 }
 
 audio_return_t _audio_stream_deinit (audio_mgr_t *am)
@@ -387,7 +417,7 @@ audio_return_t audio_get_volume_level (void *userdata, uint32_t volume_type, uin
 
     AUDIO_RETURN_VAL_IF_FAIL(am, AUDIO_ERR_PARAMETER);
 
-    *level = am->stream.volume_level[volume_type];
+    *level = am->stream.volume_level[__get_volume_dev_index(am, volume_type)][volume_type];
 
     return AUDIO_RET_OK;
 }
@@ -401,9 +431,7 @@ audio_return_t audio_get_volume_value (void *userdata, audio_info_t *info, uint3
 
         AUDIO_RETURN_VAL_IF_FAIL(am, AUDIO_ERR_PARAMETER);
         AUDIO_RETURN_VAL_IF_FAIL(am->stream.volume_gain_table, AUDIO_ERR_PARAMETER);
-
         __dump_info(&dump_str[0], info);
-
         /* Get basic volume by device & type & level */
         volume_gain_table = am->stream.volume_gain_table + __get_stream_dev_index(am->device.active_out);
         if (volume_gain_table->volume_level_max[volume_type] < level)
@@ -420,28 +448,32 @@ audio_return_t audio_get_volume_value (void *userdata, audio_info_t *info, uint3
 
 audio_return_t audio_set_volume_level (void *userdata, audio_info_t *info, uint32_t volume_type, uint32_t level)
 {
+    audio_return_t audio_ret = AUDIO_RET_OK;
     audio_mgr_t *am = (audio_mgr_t *)userdata;
 
     AUDIO_RETURN_VAL_IF_FAIL(am, AUDIO_ERR_PARAMETER);
 
     if (info == NULL) {
+
         /* Update volume level */
-        am->stream.volume_level[volume_type] = level;
+        am->stream.volume_level[__get_volume_dev_index(am, volume_type)][volume_type] = level;
+        AUDIO_LOG_INFO("set_volume_level:session(%d), %d(%s)", am->session.session, level, __get_volume_type_string_by_idx(volume_type));
     }
 
-    return AUDIO_RET_OK;
+    return audio_ret;
 }
 
-audio_return_t _audio_update_volume_level (audio_mgr_t *am)
+audio_return_t audio_get_gain_value (void *userdata, audio_info_t *info, uint32_t volume_type, double *value)
 {
-    int i;
+    audio_mgr_t *am = (audio_mgr_t *)userdata;
+    audio_volume_gain_table_t *volume_gain_table;
 
-    for (i = 0; i < AUDIO_VOLUME_TYPE_MAX; i++) {
-        /* Update vconf */
-        if (vconf_set_int(g_volume_vconf[i], am->stream.volume_level[i]) != 0) {
-            AUDIO_LOG_ERROR("vconf_set_int(%s) failed", g_volume_vconf[i]);
-            continue;
-        }
+    AUDIO_RETURN_VAL_IF_FAIL(am, AUDIO_ERR_PARAMETER);
+    AUDIO_RETURN_VAL_IF_FAIL(am->stream.volume_gain_table, AUDIO_ERR_PARAMETER);
+
+    if (info != NULL) {
+        volume_gain_table = am->stream.volume_gain_table + __get_stream_dev_index(am->device.active_out);
+        *value = volume_gain_table->gain[info->stream.gain_type];
     }
 
     return AUDIO_RET_OK;
@@ -449,9 +481,23 @@ audio_return_t _audio_update_volume_level (audio_mgr_t *am)
 
 audio_return_t audio_get_mute (void *userdata, audio_info_t *info, uint32_t volume_type, uint32_t direction, uint32_t *mute)
 {
-    return AUDIO_RET_OK;}
+    audio_return_t audio_ret = AUDIO_RET_OK;
+    audio_mgr_t *am = (audio_mgr_t *)userdata;
+
+    AUDIO_RETURN_VAL_IF_FAIL(am, AUDIO_ERR_PARAMETER);
+
+    /* TODO. Not implemented */
+
+    return audio_ret;
+}
 
 audio_return_t audio_set_mute (void *userdata, audio_info_t *info, uint32_t volume_type, uint32_t direction, uint32_t mute)
 {
-    return AUDIO_RET_OK;
+    audio_return_t audio_ret = AUDIO_RET_OK;
+    audio_mgr_t *am = (audio_mgr_t *)userdata;
+
+    AUDIO_RETURN_VAL_IF_FAIL(am, AUDIO_ERR_PARAMETER);
+    /* TODO. Not implemented */
+
+    return audio_ret;
 }
